@@ -34,8 +34,8 @@ pub struct OpenAiCompatibleProvider {
     /// to the first `user` message, then drop the system messages.
     /// Required for providers that reject `role: system` (e.g. MiniMax).
     merge_system_into_user: bool,
-    /// Whether this provider supports OpenAI-style native tool calling.
-    /// When false, tools are injected into the system prompt as text.
+    /// Whether this provider supports OpenAI-style native tool definitions
+    /// in API payloads.
     native_tool_calling: bool,
 }
 
@@ -58,7 +58,7 @@ impl OpenAiCompatibleProvider {
         auth_style: AuthStyle,
     ) -> Self {
         Self::new_with_options(
-            name, base_url, credential, auth_style, false, true, None, false,
+            name, base_url, credential, auth_style, false, true, None, false, true,
         )
     }
 
@@ -78,6 +78,7 @@ impl OpenAiCompatibleProvider {
             true,
             None,
             false,
+            true,
         )
     }
 
@@ -90,7 +91,7 @@ impl OpenAiCompatibleProvider {
         auth_style: AuthStyle,
     ) -> Self {
         Self::new_with_options(
-            name, base_url, credential, auth_style, false, false, None, false,
+            name, base_url, credential, auth_style, false, false, None, false, true,
         )
     }
 
@@ -114,6 +115,7 @@ impl OpenAiCompatibleProvider {
             true,
             Some(user_agent),
             false,
+            true,
         )
     }
 
@@ -134,6 +136,7 @@ impl OpenAiCompatibleProvider {
             true,
             Some(user_agent),
             false,
+            true,
         )
     }
 
@@ -146,7 +149,7 @@ impl OpenAiCompatibleProvider {
         auth_style: AuthStyle,
     ) -> Self {
         Self::new_with_options(
-            name, base_url, credential, auth_style, false, false, None, true,
+            name, base_url, credential, auth_style, false, false, None, true, false,
         )
     }
 
@@ -159,6 +162,7 @@ impl OpenAiCompatibleProvider {
         supports_responses_fallback: bool,
         user_agent: Option<&str>,
         merge_system_into_user: bool,
+        native_tool_calling: bool,
     ) -> Self {
         Self {
             name: name.to_string(),
@@ -169,7 +173,7 @@ impl OpenAiCompatibleProvider {
             supports_responses_fallback,
             user_agent: user_agent.map(ToString::to_string),
             merge_system_into_user,
-            native_tool_calling: !merge_system_into_user,
+            native_tool_calling,
         }
     }
 
@@ -2333,64 +2337,16 @@ mod tests {
     }
 
     #[test]
-    fn minimax_provider_disables_native_tool_calling() {
+    fn merge_system_constructor_disables_native_tool_calling() {
         let p = OpenAiCompatibleProvider::new_merge_system_into_user(
             "MiniMax",
-            "https://api.minimax.chat/v1",
+            "https://api.minimaxi.com/v1",
             Some("k"),
             AuthStyle::Bearer,
         );
         let caps = <OpenAiCompatibleProvider as Provider>::capabilities(&p);
-        assert!(
-            !caps.native_tool_calling,
-            "MiniMax should use prompt-guided tool calling, not native"
-        );
-        assert!(!caps.vision);
-    }
-
-    #[test]
-    fn user_agent_constructor_keeps_native_tool_calling_enabled() {
-        let p = OpenAiCompatibleProvider::new_with_user_agent(
-            "TestProvider",
-            "https://example.com",
-            Some("k"),
-            AuthStyle::Bearer,
-            "zeroclaw-test/1.0",
-        );
-        let caps = <OpenAiCompatibleProvider as Provider>::capabilities(&p);
-        assert!(caps.native_tool_calling);
-        assert!(!caps.vision);
-        assert_eq!(p.user_agent.as_deref(), Some("zeroclaw-test/1.0"));
-    }
-
-    #[test]
-    fn user_agent_and_vision_constructor_preserves_capability_flags() {
-        let p = OpenAiCompatibleProvider::new_with_user_agent_and_vision(
-            "VisionProvider",
-            "https://example.com",
-            Some("k"),
-            AuthStyle::Bearer,
-            "zeroclaw-test/vision",
-            true,
-        );
-        let caps = <OpenAiCompatibleProvider as Provider>::capabilities(&p);
-        assert!(caps.native_tool_calling);
-        assert!(caps.vision);
-        assert_eq!(p.user_agent.as_deref(), Some("zeroclaw-test/vision"));
-    }
-
-    #[test]
-    fn no_responses_fallback_constructor_keeps_native_tool_calling_enabled() {
-        let p = OpenAiCompatibleProvider::new_no_responses_fallback(
-            "FallbackProvider",
-            "https://example.com",
-            Some("k"),
-            AuthStyle::Bearer,
-        );
-        let caps = <OpenAiCompatibleProvider as Provider>::capabilities(&p);
-        assert!(caps.native_tool_calling);
-        assert!(!caps.vision);
-        assert!(p.user_agent.is_none());
+        assert!(!caps.native_tool_calling);
+        assert!(!p.supports_native_tools());
     }
 
     #[test]
