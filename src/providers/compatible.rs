@@ -33,6 +33,9 @@ pub struct OpenAiCompatibleProvider {
     /// to the first `user` message, then drop the system messages.
     /// Required for providers that reject `role: system` (e.g. MiniMax).
     merge_system_into_user: bool,
+    /// When true, use `/responses` endpoint directly instead of `/chat/completions`.
+    /// Required for Responses-first/Responses-only gateways.
+    responses_first: bool,
 }
 
 /// How the provider expects the API key to be sent.
@@ -156,6 +159,30 @@ impl OpenAiCompatibleProvider {
         user_agent: Option<&str>,
         merge_system_into_user: bool,
     ) -> Self {
+        Self::new_with_all_options(
+            name,
+            base_url,
+            credential,
+            auth_style,
+            supports_vision,
+            supports_responses_fallback,
+            user_agent,
+            merge_system_into_user,
+            false, // responses_first
+        )
+    }
+
+    fn new_with_all_options(
+        name: &str,
+        base_url: &str,
+        credential: Option<&str>,
+        auth_style: AuthStyle,
+        supports_vision: bool,
+        supports_responses_fallback: bool,
+        user_agent: Option<&str>,
+        merge_system_into_user: bool,
+        responses_first: bool,
+    ) -> Self {
         Self {
             name: name.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -165,7 +192,21 @@ impl OpenAiCompatibleProvider {
             supports_responses_fallback,
             user_agent: user_agent.map(ToString::to_string),
             merge_system_into_user,
+            responses_first,
         }
+    }
+
+    /// Create a provider that uses the `/responses` endpoint directly.
+    /// Use for Responses-first/Responses-only gateways (e.g., OpenAI Responses API).
+    pub fn new_responses_first(
+        name: &str,
+        base_url: &str,
+        credential: Option<&str>,
+        auth_style: AuthStyle,
+    ) -> Self {
+        Self::new_with_all_options(
+            name, base_url, credential, auth_style, false, false, None, false, true,
+        )
     }
 
     /// Collect all `system` role messages, concatenate their content,
@@ -1441,12 +1482,26 @@ impl Provider for OpenAiCompatibleProvider {
             )
         })?;
 
-        let tools = Self::convert_tool_specs(request.tools);
         let effective_messages = if self.merge_system_into_user {
             Self::flatten_system_messages(request.messages)
         } else {
             request.messages.to_vec()
         };
+
+        // If responses_first mode is enabled, go directly to /responses endpoint
+        if self.responses_first {
+            return self
+                .chat_via_responses(credential, &effective_messages, model)
+                .await
+                .map(|text| ProviderChatResponse {
+                    text: Some(text),
+                    tool_calls: vec![],
+                    usage: None,
+                    reasoning_content: None,
+                });
+        }
+
+        let tools = Self::convert_tool_specs(request.tools);
         let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages_for_native(&effective_messages),

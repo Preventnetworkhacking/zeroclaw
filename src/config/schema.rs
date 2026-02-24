@@ -57,6 +57,24 @@ static RUNTIME_PROXY_CONFIG: OnceLock<RwLock<ProxyConfig>> = OnceLock::new();
 static RUNTIME_PROXY_CLIENT_CACHE: OnceLock<RwLock<HashMap<String, reqwest::Client>>> =
     OnceLock::new();
 
+// ── Provider API mode ──────────────────────────────────────────────
+
+/// API wire format for `custom:` providers.
+///
+/// Controls whether ZeroClaw uses the OpenAI chat-completions endpoint or the
+/// responses endpoint when communicating with custom providers.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderApiMode {
+    /// Use `/chat/completions` endpoint (default, backward compatible).
+    /// Falls back to `/responses` on 404.
+    #[default]
+    OpenaiChatCompletions,
+    /// Use `/responses` endpoint directly (no chat-completions attempt).
+    /// Required for Responses-first/Responses-only gateways.
+    OpenaiResponses,
+}
+
 // ── Top-level config ──────────────────────────────────────────────
 
 /// Top-level ZeroClaw configuration, loaded from `config.toml`.
@@ -74,6 +92,10 @@ pub struct Config {
     pub api_key: Option<String>,
     /// Base URL override for provider API (e.g. "http://10.0.0.1:11434" for remote Ollama)
     pub api_url: Option<String>,
+    /// API wire format for `custom:` providers. Default: `openai-chat-completions`.
+    /// Set to `openai-responses` for Responses-first/Responses-only gateways.
+    #[serde(default)]
+    pub provider_api: ProviderApiMode,
     /// Default provider ID or alias (e.g. `"openrouter"`, `"ollama"`, `"anthropic"`). Default: `"openrouter"`.
     pub default_provider: Option<String>,
     /// Default model routed through the selected provider (e.g. `"anthropic/claude-sonnet-4-6"`).
@@ -3465,6 +3487,7 @@ impl Default for Config {
             config_path: zeroclaw_dir.join("config.toml"),
             api_key: None,
             api_url: None,
+            provider_api: ProviderApiMode::default(),
             default_provider: Some("openrouter".to_string()),
             default_model: Some("anthropic/claude-sonnet-4.6".to_string()),
             default_temperature: 0.7,

@@ -133,6 +133,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
             Some(api_key)
         },
         api_url: provider_api_url,
+        provider_api: crate::config::ProviderApiMode::default(),
         default_provider: Some(provider),
         default_model: Some(model),
         default_temperature: 0.7,
@@ -481,6 +482,7 @@ async fn run_quick_setup_with_home(
             s
         }),
         api_url: None,
+        provider_api: crate::config::ProviderApiMode::default(),
         default_provider: Some(provider_name.clone()),
         default_model: Some(model.clone()),
         default_temperature: 0.7,

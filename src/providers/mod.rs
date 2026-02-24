@@ -675,6 +675,8 @@ pub struct ProviderRuntimeOptions {
     pub zeroclaw_dir: Option<PathBuf>,
     pub secrets_encrypt: bool,
     pub reasoning_enabled: Option<bool>,
+    /// API wire format for `custom:` providers.
+    pub provider_api: Option<crate::config::ProviderApiMode>,
 }
 
 impl Default for ProviderRuntimeOptions {
@@ -684,6 +686,7 @@ impl Default for ProviderRuntimeOptions {
             zeroclaw_dir: None,
             secrets_encrypt: true,
             reasoning_enabled: None,
+            provider_api: None,
         }
     }
 }
@@ -1202,12 +1205,26 @@ fn create_provider_with_url_and_options(
                 "Custom provider",
                 "custom:https://your-api.com",
             )?;
-            Ok(Box::new(OpenAiCompatibleProvider::new(
-                "Custom",
-                &base_url,
-                key,
-                AuthStyle::Bearer,
-            )))
+            // Check if responses-first mode is requested via config
+            let use_responses_first = matches!(
+                options.provider_api,
+                Some(crate::config::ProviderApiMode::OpenaiResponses)
+            );
+            if use_responses_first {
+                Ok(Box::new(OpenAiCompatibleProvider::new_responses_first(
+                    "Custom",
+                    &base_url,
+                    key,
+                    AuthStyle::Bearer,
+                )))
+            } else {
+                Ok(Box::new(OpenAiCompatibleProvider::new(
+                    "Custom",
+                    &base_url,
+                    key,
+                    AuthStyle::Bearer,
+                )))
+            }
         }
 
         // ── Anthropic-compatible custom endpoints ───────────
