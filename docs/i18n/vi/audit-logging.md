@@ -104,7 +104,10 @@ impl AuditLogger {
 
     pub fn search(&self, filter: AuditFilter) -> Vec<AuditEvent> {
         // Tìm kiếm file log theo tiêu chí filter
-        todo!()
+        // Triển khai phụ thuộc vào backend lưu trữ của bạn
+        // Với file: phân tích JSONL, lọc theo tiêu chí
+        // Với database: sử dụng mệnh đề SQL WHERE
+        Vec::new() // Placeholder - triển khai dựa trên backend của bạn
     }
 }
 ```

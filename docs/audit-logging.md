@@ -103,7 +103,10 @@ impl AuditLogger {
 
     pub fn search(&self, filter: AuditFilter) -> Vec<AuditEvent> {
         // Search log file by filter criteria
-        todo!()
+        // Implementation depends on your storage backend
+        // For file-based: parse JSONL, filter by criteria
+        // For database: use SQL WHERE clauses
+        Vec::new() // Placeholder - implement based on your backend
     }
 }
 ```
