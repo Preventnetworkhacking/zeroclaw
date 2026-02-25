@@ -16,7 +16,7 @@ const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
 /// Reserve space for continuation markers added by send_text_chunks:
 /// worst case is "(continued)\n\n" + chunk + "\n\n(continues...)" = 30 extra chars
 const TELEGRAM_CONTINUATION_OVERHEAD: usize = 30;
-const TELEGRAM_ACK_REACTIONS: &[&str] = &["⚡️", "🦀", "🙌", "💪", "👌", "👀", "👣"];
+const TELEGRAM_ACK_REACTIONS: &[&str] = &["⚡️", "👌", "👀", "🔥", "👍"];
 
 /// Metadata for an incoming document or photo attachment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +33,15 @@ struct IncomingAttachment {
 enum IncomingAttachmentKind {
     Document,
     Photo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VoiceMetadata {
+    file_id: String,
+    duration_secs: u64,
+    file_name_hint: Option<String>,
+    mime_type_hint: Option<String>,
+    voice_note: bool,
 }
 const TELEGRAM_BIND_COMMAND: &str = "/bind";
 
@@ -167,17 +176,18 @@ fn is_image_extension(path: &Path) -> bool {
 
 /// Build the user-facing content string for an incoming attachment.
 ///
-/// Photos with a recognized image extension use `[IMAGE:/path]` so the
-/// multimodal pipeline can validate vision capability. Non-image files
-/// always use `[Document: name] /path` regardless of how Telegram
-/// classified them.
+/// Photos and Documents with a recognized image extension use `[IMAGE:/path]`
+/// so the multimodal pipeline can validate vision capability and send them
+/// as proper image content blocks. Non-image files use `[Document: name] /path`.
 fn format_attachment_content(
     kind: IncomingAttachmentKind,
     local_filename: &str,
     local_path: &Path,
 ) -> String {
     match kind {
-        IncomingAttachmentKind::Photo if is_image_extension(local_path) => {
+        IncomingAttachmentKind::Photo | IncomingAttachmentKind::Document
+            if is_image_extension(local_path) =>
+        {
             format!("[IMAGE:{}]", local_path.display())
         }
         _ => {
@@ -244,6 +254,23 @@ fn strip_tool_call_tags(message: &str) -> String {
     super::strip_tool_call_tags(message)
 }
 
+fn find_matching_close(s: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_attachment_markers(message: &str) -> (String, Vec<TelegramAttachment>) {
     let mut cleaned = String::with_capacity(message.len());
     let mut attachments = Vec::new();
@@ -258,12 +285,12 @@ fn parse_attachment_markers(message: &str) -> (String, Vec<TelegramAttachment>) 
         let open = cursor + open_rel;
         cleaned.push_str(&message[cursor..open]);
 
-        let Some(close_rel) = message[open..].find(']') else {
+        let Some(close_rel) = find_matching_close(&message[open + 1..]) else {
             cleaned.push_str(&message[open..]);
             break;
         };
 
-        let close = open + close_rel;
+        let close = open + 1 + close_rel;
         let marker = &message[open + 1..close];
 
         let parsed = marker.split_once(':').and_then(|(kind, target)| {
@@ -845,15 +872,109 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         Ok(resp.bytes().await?.to_vec())
     }
 
-    /// Extract (file_id, duration) from a voice or audio message.
-    fn parse_voice_metadata(message: &serde_json::Value) -> Option<(String, u64)> {
-        let voice = message.get("voice").or_else(|| message.get("audio"))?;
+    /// Extract transcription metadata from a voice or audio payload.
+    fn parse_voice_metadata(message: &serde_json::Value) -> Option<VoiceMetadata> {
+        let (voice, voice_note) = if let Some(voice) = message.get("voice") {
+            (voice, true)
+        } else {
+            (message.get("audio")?, false)
+        };
+
         let file_id = voice.get("file_id")?.as_str()?.to_string();
-        let duration = voice
+        let duration_secs = voice
             .get("duration")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        Some((file_id, duration))
+        let file_name_hint = voice
+            .get("file_name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .filter(|name| !name.trim().is_empty());
+        let mime_type_hint = voice
+            .get("mime_type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .filter(|mime| !mime.trim().is_empty());
+
+        Some(VoiceMetadata {
+            file_id,
+            duration_secs,
+            file_name_hint,
+            mime_type_hint,
+            voice_note,
+        })
+    }
+
+    fn extension_from_audio_mime_type(mime_type: &str) -> Option<&'static str> {
+        match mime_type.trim().to_ascii_lowercase().as_str() {
+            "audio/flac" | "audio/x-flac" => Some("flac"),
+            "audio/mpeg" => Some("mp3"),
+            "audio/mp4" => Some("mp4"),
+            "audio/x-m4a" => Some("m4a"),
+            "audio/ogg" | "application/ogg" => Some("ogg"),
+            "audio/opus" => Some("opus"),
+            "audio/wav" | "audio/x-wav" | "audio/wave" => Some("wav"),
+            "audio/webm" => Some("webm"),
+            _ => None,
+        }
+    }
+
+    fn has_file_extension(name: &str) -> bool {
+        std::path::Path::new(name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| !ext.trim().is_empty())
+    }
+
+    fn infer_voice_filename(file_path: &str, metadata: &VoiceMetadata) -> String {
+        let basename = file_path.rsplit('/').next().unwrap_or("").trim();
+        if !basename.is_empty() && Self::has_file_extension(basename) {
+            return basename.to_string();
+        }
+
+        if let Some(hint) = metadata
+            .file_name_hint
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if Self::has_file_extension(hint) {
+                return hint.to_string();
+            }
+        }
+
+        let default_stem = if metadata.voice_note {
+            "voice"
+        } else {
+            "audio"
+        };
+        let stem = if basename.is_empty() {
+            metadata
+                .file_name_hint
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(default_stem)
+        } else {
+            basename
+        }
+        .trim_end_matches('.');
+
+        if let Some(extension) = metadata
+            .mime_type_hint
+            .as_deref()
+            .and_then(Self::extension_from_audio_mime_type)
+        {
+            return format!("{stem}.{extension}");
+        }
+
+        // Last-resort fallback keeps extension present so transcription backends
+        // do not reject otherwise valid payloads from extension-less file paths.
+        if metadata.voice_note {
+            format!("{stem}.ogg")
+        } else {
+            format!("{stem}.mp3")
+        }
     }
 
     /// Extract attachment metadata from an incoming Telegram message (document or photo).
@@ -953,7 +1074,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             .and_then(serde_json::Value::as_i64)
             .map(|id| id.to_string());
 
-        let reply_target = if let Some(tid) = thread_id {
+        let reply_target = if let Some(ref tid) = thread_id {
             format!("{}:{}", chat_id, tid)
         } else {
             chat_id.clone()
@@ -1031,7 +1152,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            thread_ts: None,
+            thread_ts: thread_id,
         })
     }
 
@@ -1040,14 +1161,30 @@ Allowlist Telegram username (without '@') or numeric user ID.",
     /// Returns `None` if the message is not a voice message, transcription is disabled,
     /// or the message exceeds duration limits.
     async fn try_parse_voice_message(&self, update: &serde_json::Value) -> Option<ChannelMessage> {
-        let config = self.transcription.as_ref()?;
+        // Check if transcription is enabled before doing anything else
+        let config = match self.transcription.as_ref() {
+            Some(c) => c,
+            None => {
+                // Log at debug level when a voice message is received but transcription is disabled
+                if let Some(message) = update.get("message") {
+                    if message.get("voice").is_some() || message.get("audio").is_some() {
+                        tracing::debug!(
+                            "Received voice/audio message but transcription is disabled. \
+                             Set [transcription].enabled = true to enable voice transcription."
+                        );
+                    }
+                }
+                return None;
+            }
+        };
         let message = update.get("message")?;
 
-        let (file_id, duration) = Self::parse_voice_metadata(message)?;
+        let metadata = Self::parse_voice_metadata(message)?;
 
-        if duration > config.max_duration_secs {
+        if metadata.duration_secs > config.max_duration_secs {
             tracing::info!(
-                "Skipping voice message: duration {duration}s exceeds limit {}s",
+                "Skipping voice message: duration {}s exceeds limit {}s",
+                metadata.duration_secs,
                 config.max_duration_secs
             );
             return None;
@@ -1061,6 +1198,14 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         }
 
         if !self.is_any_user_allowed(identities.iter().copied()) {
+            tracing::debug!(
+                "Skipping voice message from unauthorized user: {} (allowed_users: {:?})",
+                sender_identity,
+                self.allowed_users
+                    .read()
+                    .map(|u| u.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default()
+            );
             return None;
         }
 
@@ -1080,14 +1225,14 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             .and_then(serde_json::Value::as_i64)
             .map(|id| id.to_string());
 
-        let reply_target = if let Some(tid) = thread_id {
+        let reply_target = if let Some(ref tid) = thread_id {
             format!("{}:{}", chat_id, tid)
         } else {
             chat_id.clone()
         };
 
         // Download and transcribe
-        let file_path = match self.get_file_path(&file_id).await {
+        let file_path = match self.get_file_path(&metadata.file_id).await {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("Failed to get voice file path: {e}");
@@ -1095,11 +1240,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             }
         };
 
-        let file_name = file_path
-            .rsplit('/')
-            .next()
-            .unwrap_or("voice.ogg")
-            .to_string();
+        let file_name = Self::infer_voice_filename(&file_path, &metadata);
 
         let audio_data = match self.download_file(&file_path).await {
             Ok(d) => d,
@@ -1132,6 +1273,13 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             cache.insert(format!("{chat_id}:{message_id}"), text.clone());
         }
 
+        tracing::info!(
+            "Voice message transcribed successfully ({} chars) for user {} in chat {}",
+            text.len(),
+            sender_identity,
+            chat_id
+        );
+
         let content = if let Some(quote) = self.extract_reply_context(message) {
             format!("{quote}\n\n[Voice] {text}")
         } else {
@@ -1148,7 +1296,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            thread_ts: None,
+            thread_ts: thread_id,
         })
     }
 
@@ -1274,7 +1422,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             .map(|id| id.to_string());
 
         // reply_target: chat_id or chat_id:thread_id format
-        let reply_target = if let Some(tid) = thread_id {
+        let reply_target = if let Some(ref tid) = thread_id {
             format!("{}:{}", chat_id, tid)
         } else {
             chat_id.clone()
@@ -1304,7 +1452,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            thread_ts: None,
+            thread_ts: thread_id,
         })
     }
 
@@ -1696,6 +1844,21 @@ Allowlist Telegram username (without '@') or numeric user ID.",
 
             return Ok(());
         }
+
+        // Remap Docker container workspace path (/workspace/...) to the host
+        // workspace directory so files written by the containerised runtime
+        // can be found and sent by the host-side Telegram sender.
+        let remapped;
+        let target = if let Some(rel) = target.strip_prefix("/workspace/") {
+            if let Some(ws) = &self.workspace_dir {
+                remapped = ws.join(rel);
+                remapped.to_str().unwrap_or(target)
+            } else {
+                target
+            }
+        } else {
+            target
+        };
 
         let path = Path::new(target);
         if !path.exists() {
@@ -2258,28 +2421,62 @@ impl Channel for TelegramChannel {
         // Clean up rate-limit tracking for this chat
         self.last_draft_edit.lock().remove(&chat_id);
 
+        // Parse attachments before processing
+        let (text_without_markers, attachments) = parse_attachment_markers(text);
+
+        // Parse message ID once for reuse
+        let msg_id = match message_id.parse::<i64>() {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!("Invalid Telegram message_id '{message_id}': {e}");
+                None
+            }
+        };
+
+        // If we have attachments, delete the draft and send fresh messages
+        // (Telegram editMessageText can't add attachments)
+        if !attachments.is_empty() {
+            // Delete the draft message
+            if let Some(id) = msg_id {
+                let _ = self
+                    .client
+                    .post(self.api_url("deleteMessage"))
+                    .json(&serde_json::json!({
+                        "chat_id": chat_id,
+                        "message_id": id,
+                    }))
+                    .send()
+                    .await;
+            }
+
+            // Send text without markers
+            if !text_without_markers.is_empty() {
+                self.send_text_chunks(&text_without_markers, &chat_id, thread_id.as_deref())
+                    .await?;
+            }
+
+            // Send attachments
+            for attachment in &attachments {
+                self.send_attachment(&chat_id, thread_id.as_deref(), attachment)
+                    .await?;
+            }
+
+            return Ok(());
+        }
+
         // If text exceeds limit, delete draft and send as chunked messages
         if text.len() > TELEGRAM_MAX_MESSAGE_LENGTH {
-            let msg_id = match message_id.parse::<i64>() {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::warn!("Invalid Telegram message_id '{message_id}': {e}");
-                    return self
-                        .send_text_chunks(text, &chat_id, thread_id.as_deref())
-                        .await;
-                }
-            };
-
-            // Delete the draft
-            let _ = self
-                .client
-                .post(self.api_url("deleteMessage"))
-                .json(&serde_json::json!({
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                }))
-                .send()
-                .await;
+            if let Some(id) = msg_id {
+                let _ = self
+                    .client
+                    .post(self.api_url("deleteMessage"))
+                    .json(&serde_json::json!({
+                        "chat_id": chat_id,
+                        "message_id": id,
+                    }))
+                    .send()
+                    .await;
+            }
 
             // Fall back to chunked send
             return self
@@ -2287,20 +2484,16 @@ impl Channel for TelegramChannel {
                 .await;
         }
 
-        let msg_id = match message_id.parse::<i64>() {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!("Invalid Telegram message_id '{message_id}': {e}");
-                return self
-                    .send_text_chunks(text, &chat_id, thread_id.as_deref())
-                    .await;
-            }
+        let Some(id) = msg_id else {
+            return self
+                .send_text_chunks(text, &chat_id, thread_id.as_deref())
+                .await;
         };
 
         // Try editing with HTML formatting
         let body = serde_json::json!({
             "chat_id": chat_id,
-            "message_id": msg_id,
+            "message_id": id,
             "text": Self::markdown_to_telegram_html(text),
             "parse_mode": "HTML",
         });
@@ -2319,7 +2512,7 @@ impl Channel for TelegramChannel {
         // Markdown failed — retry without parse_mode
         let plain_body = serde_json::json!({
             "chat_id": chat_id,
-            "message_id": msg_id,
+            "message_id": id,
             "text": text,
         });
 
@@ -2414,6 +2607,77 @@ impl Channel for TelegramChannel {
 
         tracing::info!("Telegram channel listening for messages...");
 
+        // Startup probe: claim the getUpdates slot before entering the long-poll loop.
+        // A previous daemon's 30-second poll may still be active on Telegram's server.
+        // We retry with timeout=0 until we receive a successful (non-409) response,
+        // confirming the slot is ours. This prevents the long-poll loop from entering
+        // a self-sustaining 409 cycle where each rejected request is immediately retried.
+        loop {
+            let url = self.api_url("getUpdates");
+            let probe = serde_json::json!({
+                "offset": offset,
+                "timeout": 0,
+                "allowed_updates": ["message"]
+            });
+            match self.http_client().post(&url).json(&probe).send().await {
+                Err(e) => {
+                    tracing::warn!("Telegram startup probe error: {e}; retrying in 5s");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                Ok(resp) => {
+                    match resp.json::<serde_json::Value>().await {
+                        Err(e) => {
+                            tracing::warn!(
+                                "Telegram startup probe parse error: {e}; retrying in 5s"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        }
+                        Ok(data) => {
+                            let ok = data
+                                .get("ok")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(false);
+                            if ok {
+                                // Slot claimed — advance offset past any queued updates.
+                                if let Some(results) =
+                                    data.get("result").and_then(serde_json::Value::as_array)
+                                {
+                                    for update in results {
+                                        if let Some(uid) = update
+                                            .get("update_id")
+                                            .and_then(serde_json::Value::as_i64)
+                                        {
+                                            offset = uid + 1;
+                                        }
+                                    }
+                                }
+                                break; // Probe succeeded; enter the long-poll loop.
+                            }
+
+                            let error_code = data
+                                .get("error_code")
+                                .and_then(serde_json::Value::as_i64)
+                                .unwrap_or_default();
+                            if error_code == 409 {
+                                tracing::debug!("Startup probe: slot busy (409), retrying in 5s");
+                            } else {
+                                let desc = data
+                                    .get("description")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("unknown");
+                                tracing::warn!(
+                                    "Startup probe: API error {error_code}: {desc}; retrying in 5s"
+                                );
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::debug!("Startup probe succeeded; entering main long-poll loop.");
+
         loop {
             if self.mention_only {
                 let missing_username = self.bot_username.lock().is_none();
@@ -2466,7 +2730,10 @@ impl Channel for TelegramChannel {
                         "Telegram polling conflict (409): {description}. \
 Ensure only one `zeroclaw` process is using this bot token."
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // Back off for 35 seconds — longer than Telegram's 30-second poll
+                    // timeout — so any competing session (e.g. a stale connection from
+                    // a previous daemon) has time to expire before we retry.
+                    tokio::time::sleep(std::time::Duration::from_secs(35)).await;
                 } else {
                     tracing::warn!(
                         "Telegram getUpdates API error (code={}): {description}",
@@ -2883,6 +3150,28 @@ mod tests {
         let (cleaned, attachments) = parse_attachment_markers(message);
 
         assert_eq!(cleaned, "Report [UNKNOWN:/tmp/a.bin]");
+        assert!(attachments.is_empty());
+    }
+
+    #[test]
+    fn parse_attachment_markers_handles_brackets_in_filename() {
+        let message = "Here it is [VIDEO:/mnt/clips/Butters - What What [G4PvTrTp7Tc].mp4]";
+        let (cleaned, attachments) = parse_attachment_markers(message);
+
+        assert_eq!(cleaned, "Here it is");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].kind, TelegramAttachmentKind::Video);
+        assert_eq!(
+            attachments[0].target,
+            "/mnt/clips/Butters - What What [G4PvTrTp7Tc].mp4"
+        );
+    }
+
+    #[test]
+    fn parse_attachment_markers_unclosed_bracket_falls_back_to_text() {
+        let message = "send [VIDEO:/path/file[broken.mp4";
+        let (cleaned, attachments) = parse_attachment_markers(message);
+        assert_eq!(cleaned, "send [VIDEO:/path/file[broken.mp4");
         assert!(attachments.is_empty());
     }
 
@@ -3755,9 +4044,10 @@ mod tests {
                 "duration": 5
             }
         });
-        let (file_id, dur) = TelegramChannel::parse_voice_metadata(&msg).unwrap();
-        assert_eq!(file_id, "abc123");
-        assert_eq!(dur, 5);
+        let meta = TelegramChannel::parse_voice_metadata(&msg).unwrap();
+        assert_eq!(meta.file_id, "abc123");
+        assert_eq!(meta.duration_secs, 5);
+        assert!(meta.voice_note);
     }
 
     #[test]
@@ -3768,9 +4058,10 @@ mod tests {
                 "duration": 30
             }
         });
-        let (file_id, dur) = TelegramChannel::parse_voice_metadata(&msg).unwrap();
-        assert_eq!(file_id, "audio456");
-        assert_eq!(dur, 30);
+        let meta = TelegramChannel::parse_voice_metadata(&msg).unwrap();
+        assert_eq!(meta.file_id, "audio456");
+        assert_eq!(meta.duration_secs, 30);
+        assert!(!meta.voice_note);
     }
 
     #[test]
@@ -3788,8 +4079,53 @@ mod tests {
                 "file_id": "no_dur"
             }
         });
-        let (_, dur) = TelegramChannel::parse_voice_metadata(&msg).unwrap();
-        assert_eq!(dur, 0);
+        let meta = TelegramChannel::parse_voice_metadata(&msg).unwrap();
+        assert_eq!(meta.duration_secs, 0);
+    }
+
+    #[test]
+    fn infer_voice_filename_prefers_hint_with_extension() {
+        let meta = VoiceMetadata {
+            file_id: "f".into(),
+            duration_secs: 0,
+            file_name_hint: Some("telegram_voice.m4a".into()),
+            mime_type_hint: Some("audio/mp4".into()),
+            voice_note: false,
+        };
+        assert_eq!(
+            TelegramChannel::infer_voice_filename("voice/file_without_ext", &meta),
+            "telegram_voice.m4a"
+        );
+    }
+
+    #[test]
+    fn infer_voice_filename_uses_mime_extension_when_path_has_none() {
+        let meta = VoiceMetadata {
+            file_id: "f".into(),
+            duration_secs: 0,
+            file_name_hint: None,
+            mime_type_hint: Some("audio/ogg".into()),
+            voice_note: true,
+        };
+        assert_eq!(
+            TelegramChannel::infer_voice_filename("voice/file_without_ext", &meta),
+            "file_without_ext.ogg"
+        );
+    }
+
+    #[test]
+    fn infer_voice_filename_falls_back_for_audio_without_hints() {
+        let meta = VoiceMetadata {
+            file_id: "f".into(),
+            duration_secs: 0,
+            file_name_hint: None,
+            mime_type_hint: None,
+            voice_note: false,
+        };
+        assert_eq!(
+            TelegramChannel::infer_voice_filename("voice/file_without_ext", &meta),
+            "file_without_ext.mp3"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -3936,6 +4272,65 @@ mod tests {
         let ch =
             TelegramChannel::new("token".into(), vec!["*".into()], false).with_transcription(tc);
         assert!(ch.transcription.is_none());
+    }
+
+    #[tokio::test]
+    async fn try_parse_voice_message_returns_none_when_transcription_disabled() {
+        let ch = TelegramChannel::new("token".into(), vec!["*".into()], false);
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "voice": { "file_id": "voice_file", "duration": 4 },
+                "from": { "id": 123, "username": "alice" },
+                "chat": { "id": 456, "type": "private" }
+            }
+        });
+
+        let parsed = ch.try_parse_voice_message(&update).await;
+        assert!(parsed.is_none());
+    }
+
+    #[tokio::test]
+    async fn try_parse_voice_message_skips_when_duration_exceeds_limit() {
+        let mut tc = crate::config::TranscriptionConfig::default();
+        tc.enabled = true;
+        tc.max_duration_secs = 5;
+
+        let ch =
+            TelegramChannel::new("token".into(), vec!["*".into()], false).with_transcription(tc);
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 2,
+                "voice": { "file_id": "voice_file", "duration": 30 },
+                "from": { "id": 123, "username": "alice" },
+                "chat": { "id": 456, "type": "private" }
+            }
+        });
+
+        let parsed = ch.try_parse_voice_message(&update).await;
+        assert!(parsed.is_none());
+    }
+
+    #[tokio::test]
+    async fn try_parse_voice_message_rejects_unauthorized_sender_before_download() {
+        let mut tc = crate::config::TranscriptionConfig::default();
+        tc.enabled = true;
+        tc.max_duration_secs = 120;
+
+        let ch = TelegramChannel::new("token".into(), vec!["alice".into()], false)
+            .with_transcription(tc);
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 3,
+                "voice": { "file_id": "voice_file", "duration": 4 },
+                "from": { "id": 999, "username": "bob" },
+                "chat": { "id": 456, "type": "private" }
+            }
+        });
+
+        let parsed = ch.try_parse_voice_message(&update).await;
+        assert!(parsed.is_none());
+        assert!(ch.voice_transcriptions.lock().is_empty());
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -4424,5 +4819,25 @@ mod tests {
         // The combination of marker_count > 0 && !supports_vision() means
         // the agent loop will return ProviderCapabilityError before calling
         // the provider, and the channel will send "⚠️ Error: ..." to the user.
+    }
+
+    #[test]
+    fn document_with_image_extension_routes_to_image_marker() {
+        let path = std::path::Path::new("/tmp/workspace/scan.png");
+        let result = format_attachment_content(IncomingAttachmentKind::Document, "scan.png", path);
+        assert_eq!(result, "[IMAGE:/tmp/workspace/scan.png]");
+
+        let path = std::path::Path::new("/tmp/workspace/photo.jpg");
+        let result = format_attachment_content(IncomingAttachmentKind::Document, "photo.jpg", path);
+        assert!(result.starts_with("[IMAGE:"));
+    }
+
+    #[test]
+    fn document_with_non_image_extension_routes_to_document_format() {
+        let path = std::path::Path::new("/tmp/workspace/report.pdf");
+        let result =
+            format_attachment_content(IncomingAttachmentKind::Document, "report.pdf", path);
+        assert_eq!(result, "[Document: report.pdf] /tmp/workspace/report.pdf");
+        assert!(!result.starts_with("[IMAGE:"));
     }
 }
