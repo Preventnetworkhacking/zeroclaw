@@ -1697,6 +1697,111 @@ class CiScriptsBehaviorTest(unittest.TestCase):
         self.assertGreaterEqual(len(report["files"]), 3)
         self.assertIn("zeroclaw-x86_64-unknown-linux-gnu.tar.gz", checksums.read_text(encoding="utf-8"))
 
+    def test_release_notes_supply_chain_refs_generates_release_preface(self) -> None:
+        artifacts = self.tmp / "artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        (artifacts / "release-manifest.json").write_text('{"ok":true}\n', encoding="utf-8")
+        (artifacts / "release-manifest.md").write_text("# manifest\n", encoding="utf-8")
+        (artifacts / "SHA256SUMS").write_text("abc  file\n", encoding="utf-8")
+        (artifacts / "zeroclaw.cdx.json").write_text('{"sbom":"cdx"}\n', encoding="utf-8")
+        (artifacts / "zeroclaw.spdx.json").write_text('{"sbom":"spdx"}\n', encoding="utf-8")
+        (artifacts / "zeroclaw.sha256sums.intoto.json").write_text('{"_type":"statement"}\n', encoding="utf-8")
+        (artifacts / "audit-event-release-sha256sums-provenance.json").write_text(
+            '{"schema_version":"zeroclaw.audit.v1"}\n',
+            encoding="utf-8",
+        )
+        (artifacts / "release-artifact-guard.publish.json").write_text('{"ready":true}\n', encoding="utf-8")
+        (artifacts / "audit-event-release-artifact-guard-publish.json").write_text(
+            '{"schema_version":"zeroclaw.audit.v1"}\n',
+            encoding="utf-8",
+        )
+        (artifacts / "SHA256SUMS.sig").write_text("sig\n", encoding="utf-8")
+        (artifacts / "SHA256SUMS.pem").write_text("pem\n", encoding="utf-8")
+        (artifacts / "SHA256SUMS.sigstore.json").write_text('{"bundle":"ok"}\n', encoding="utf-8")
+        trigger_dir = artifacts / "release-trigger-guard"
+        trigger_dir.mkdir(parents=True, exist_ok=True)
+        (trigger_dir / "release-trigger-guard.json").write_text('{"ready":true}\n', encoding="utf-8")
+        (trigger_dir / "audit-event-release-trigger-guard.json").write_text(
+            '{"schema_version":"zeroclaw.audit.v1"}\n',
+            encoding="utf-8",
+        )
+
+        out_json = self.tmp / "release-notes-supply-chain.json"
+        out_md = self.tmp / "release-notes-supply-chain.md"
+        proc = run_cmd(
+            [
+                "python3",
+                self._script("release_notes_with_supply_chain_refs.py"),
+                "--artifacts-dir",
+                str(artifacts),
+                "--repository",
+                "zeroclaw-labs/zeroclaw",
+                "--release-tag",
+                "v1.2.3",
+                "--output-json",
+                str(out_json),
+                "--output-md",
+                str(out_md),
+                "--fail-on-missing",
+            ]
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        report = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["violations"], [])
+        sbom_url = report["references"]["sbom_cyclonedx"]["url"]
+        self.assertIn("/releases/download/v1.2.3/zeroclaw.cdx.json", sbom_url)
+        body = out_md.read_text(encoding="utf-8")
+        self.assertIn("Supply-Chain Evidence", body)
+        self.assertIn("Automated Commit Notes", body)
+
+    def test_release_notes_supply_chain_refs_fails_on_missing_required_file(self) -> None:
+        artifacts = self.tmp / "artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        (artifacts / "release-manifest.json").write_text('{"ok":true}\n', encoding="utf-8")
+        (artifacts / "release-manifest.md").write_text("# manifest\n", encoding="utf-8")
+        (artifacts / "SHA256SUMS").write_text("abc  file\n", encoding="utf-8")
+        (artifacts / "zeroclaw.cdx.json").write_text('{"sbom":"cdx"}\n', encoding="utf-8")
+        (artifacts / "zeroclaw.spdx.json").write_text('{"sbom":"spdx"}\n', encoding="utf-8")
+        (artifacts / "zeroclaw.sha256sums.intoto.json").write_text('{"_type":"statement"}\n', encoding="utf-8")
+        (artifacts / "release-trigger-guard.json").write_text('{"ready":true}\n', encoding="utf-8")
+        (artifacts / "audit-event-release-trigger-guard.json").write_text(
+            '{"schema_version":"zeroclaw.audit.v1"}\n',
+            encoding="utf-8",
+        )
+        (artifacts / "release-artifact-guard.publish.json").write_text('{"ready":true}\n', encoding="utf-8")
+        (artifacts / "audit-event-release-artifact-guard-publish.json").write_text(
+            '{"schema_version":"zeroclaw.audit.v1"}\n',
+            encoding="utf-8",
+        )
+
+        out_json = self.tmp / "release-notes-supply-chain.missing.json"
+        out_md = self.tmp / "release-notes-supply-chain.missing.md"
+        proc = run_cmd(
+            [
+                "python3",
+                self._script("release_notes_with_supply_chain_refs.py"),
+                "--artifacts-dir",
+                str(artifacts),
+                "--repository",
+                "zeroclaw-labs/zeroclaw",
+                "--release-tag",
+                "v1.2.3",
+                "--output-json",
+                str(out_json),
+                "--output-md",
+                str(out_md),
+                "--fail-on-missing",
+            ]
+        )
+        self.assertEqual(proc.returncode, 3)
+        report = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertFalse(report["ready"])
+        self.assertIn(
+            "audit-event-release-sha256sums-provenance.json",
+            "\n".join(report["violations"]),
+        )
+
     def test_release_artifact_guard_detects_missing_archives_in_verify_stage(self) -> None:
         artifacts = self.tmp / "artifacts"
         artifacts.mkdir(parents=True, exist_ok=True)
