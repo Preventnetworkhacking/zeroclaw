@@ -701,6 +701,10 @@ pub struct SkillsConfig {
     /// `full` preserves legacy behavior. `compact` keeps context small and loads skills on demand.
     #[serde(default)]
     pub prompt_injection_mode: SkillsPromptInjectionMode,
+    /// Allow script files (`.sh`, `.py`, `.js`, etc.) in installed skills.
+    /// Default: `false` for security. Enable with caution.
+    #[serde(default)]
+    pub allow_scripts: bool,
 }
 
 /// Multimodal (image) handling configuration (`[multimodal]` section).

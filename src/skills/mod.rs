@@ -124,7 +124,7 @@ fn load_skills_from_directory(skills_dir: &Path) -> Vec<Skill> {
             continue;
         }
 
-        match audit::audit_skill_directory(&path) {
+        match audit::audit_skill_directory(&path, &audit::AuditOptions::default()) {
             Ok(report) if report.is_clean() => {}
             Ok(report) => {
                 tracing::warn!(
@@ -709,8 +709,8 @@ fn detect_newly_installed_directory(
     }
 }
 
-fn enforce_skill_security_audit(skill_path: &Path) -> Result<audit::SkillAuditReport> {
-    let report = audit::audit_skill_directory(skill_path)?;
+fn enforce_skill_security_audit(skill_path: &Path, options: &audit::AuditOptions) -> Result<audit::SkillAuditReport> {
+    let report = audit::audit_skill_directory(skill_path, options)?;
     if report.is_clean() {
         return Ok(report);
     }
@@ -781,7 +781,7 @@ fn install_local_skill_source(source: &str, skills_path: &Path) -> Result<(PathB
     let source_path = source_path
         .canonicalize()
         .with_context(|| format!("failed to canonicalize source path {source}"))?;
-    let _ = enforce_skill_security_audit(&source_path)?;
+    let _ = enforce_skill_security_audit(&source_path, &audit::AuditOptions::default())?;
 
     let name = source_path
         .file_name()
@@ -796,7 +796,7 @@ fn install_local_skill_source(source: &str, skills_path: &Path) -> Result<(PathB
         return Err(err);
     }
 
-    match enforce_skill_security_audit(&dest) {
+    match enforce_skill_security_audit(&dest, &audit::AuditOptions::default()) {
         Ok(report) => Ok((dest, report.files_scanned)),
         Err(err) => {
             let _ = std::fs::remove_dir_all(&dest);
@@ -818,7 +818,7 @@ fn install_git_skill_source(source: &str, skills_path: &Path) -> Result<(PathBuf
 
     let installed_dir = detect_newly_installed_directory(skills_path, &before)?;
     remove_git_metadata(&installed_dir)?;
-    match enforce_skill_security_audit(&installed_dir) {
+    match enforce_skill_security_audit(&installed_dir, &audit::AuditOptions::default()) {
         Ok(report) => Ok((installed_dir, report.files_scanned)),
         Err(err) => {
             let _ = std::fs::remove_dir_all(&installed_dir);
@@ -882,7 +882,7 @@ pub fn handle_command(command: crate::SkillCommands, config: &crate::config::Con
                 anyhow::bail!("Skill source or installed skill not found: {source}");
             }
 
-            let report = audit::audit_skill_directory(&target)?;
+            let report = audit::audit_skill_directory(&target, &audit::AuditOptions::default())?;
             if report.is_clean() {
                 println!(
                     "  {} Skill audit passed for {} ({} files scanned).",
