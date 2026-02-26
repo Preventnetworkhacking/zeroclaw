@@ -876,8 +876,11 @@ async fn main() -> Result<()> {
             new_pairing,
         } => {
             if new_pairing {
+                // Persist token reset from raw config so env-derived overrides are not written to disk.
+                let mut persisted_config = Config::load_or_init().await?;
+                persisted_config.gateway.paired_tokens.clear();
+                persisted_config.save().await?;
                 config.gateway.paired_tokens.clear();
-                config.save().await?;
                 info!("🔐 Cleared paired tokens — a fresh pairing code will be generated");
             }
             let port = port.unwrap_or(config.gateway.port);
@@ -2012,6 +2015,45 @@ mod tests {
                 Commands::Completions { .. } => {}
                 other => panic!("expected completions command, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn gateway_help_includes_new_pairing_flag() {
+        let cmd = Cli::command();
+        let gateway = cmd
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "gateway")
+            .expect("gateway subcommand must exist");
+
+        let has_new_pairing_flag = gateway.get_arguments().any(|arg| {
+            arg.get_id().as_str() == "new_pairing" && arg.get_long() == Some("new-pairing")
+        });
+
+        assert!(
+            has_new_pairing_flag,
+            "gateway help should include --new-pairing"
+        );
+    }
+
+    #[test]
+    fn gateway_cli_accepts_new_pairing_flag() {
+        let cli = Cli::try_parse_from(["zeroclaw", "gateway", "--new-pairing"])
+            .expect("gateway --new-pairing should parse");
+
+        match cli.command {
+            Commands::Gateway { new_pairing, .. } => assert!(new_pairing),
+            other => panic!("expected gateway command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gateway_cli_defaults_new_pairing_to_false() {
+        let cli = Cli::try_parse_from(["zeroclaw", "gateway"]).expect("gateway should parse");
+
+        match cli.command {
+            Commands::Gateway { new_pairing, .. } => assert!(!new_pairing),
+            other => panic!("expected gateway command, got {other:?}"),
         }
     }
 

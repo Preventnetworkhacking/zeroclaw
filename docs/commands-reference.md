@@ -61,8 +61,10 @@ Tip:
 
 ### `gateway` / `daemon`
 
-- `zeroclaw gateway [--host <HOST>] [--port <PORT>]`
+- `zeroclaw gateway [--host <HOST>] [--port <PORT>] [--new-pairing]`
 - `zeroclaw daemon [--host <HOST>] [--port <PORT>]`
+
+`--new-pairing` clears all stored paired tokens and forces generation of a fresh pairing code on gateway startup.
 
 ### `estop`
 
