@@ -91,7 +91,7 @@ env:
 jobs:
     vorpal:
         name: Vorpal Reviewdog Scan
-        runs-on: self-hosted
+        runs-on: [self-hosted, aws-india]
         timeout-minutes: 20
         steps:
             - name: Checkout

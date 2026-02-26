@@ -38,7 +38,7 @@ permissions:
 
 jobs:
   run:
-    runs-on: self-hosted
+    runs-on: [self-hosted, aws-india]
     timeout-minutes: ${{ inputs.timeout_minutes }}
     steps:
       - name: Checkout repository
