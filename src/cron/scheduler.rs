@@ -288,6 +288,12 @@ async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> 
         return Ok(());
     }
 
+    // Filter NO_REPLY sentinel - LLM signals nothing to report
+    if output.trim().eq_ignore_ascii_case("NO_REPLY") {
+        tracing::debug!("Cron job '{}' returned NO_REPLY — skipping delivery", job.id);
+        return Ok(());
+    }
+
     let channel = delivery
         .channel
         .as_deref()

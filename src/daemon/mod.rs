@@ -211,6 +211,17 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
             {
                 Ok(output) => {
                     crate::health::mark_component_ok("heartbeat");
+
+                    // Filter NO_REPLY and HEARTBEAT_OK sentinels - LLM signals nothing to report
+                    let trimmed = output.trim();
+                    if trimmed.eq_ignore_ascii_case("NO_REPLY")
+                        || trimmed.eq_ignore_ascii_case("HEARTBEAT_OK")
+                        || trimmed.starts_with("HEARTBEAT_OK")
+                    {
+                        tracing::debug!("Heartbeat returned sentinel — skipping delivery");
+                        continue;
+                    }
+
                     let announcement = if output.trim().is_empty() {
                         "heartbeat task executed".to_string()
                     } else {
