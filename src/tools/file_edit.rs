@@ -7,6 +7,57 @@ use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Normalize whitespace in a string by:
+/// - Collapsing consecutive whitespace characters to single spaces
+/// - Trimming leading and trailing whitespace
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Find a whitespace-flexible match at the beginning of the haystack.
+/// Returns Some(match_length) if found, None otherwise.
+fn find_whitespace_flexible_match(haystack: &[char], normalized_needle: &[char]) -> Option<usize> {
+    if normalized_needle.is_empty() {
+        return None;
+    }
+
+    let mut h_idx = 0;
+    let mut n_idx = 0;
+    let start_pos = h_idx;
+
+    while h_idx < haystack.len() && n_idx < normalized_needle.len() {
+        let h_char = haystack[h_idx];
+        let n_char = normalized_needle[n_idx];
+
+        if h_char == n_char {
+            // Exact character match
+            h_idx += 1;
+            n_idx += 1;
+        } else if h_char.is_whitespace() && n_char == ' ' {
+            // Whitespace in haystack matches normalized space in needle
+            // Consume all consecutive whitespace in haystack
+            while h_idx < haystack.len() && haystack[h_idx].is_whitespace() {
+                h_idx += 1;
+            }
+            n_idx += 1;
+        } else if h_char.is_whitespace() && n_idx > 0 && n_idx < normalized_needle.len() - 1 {
+            // Extra whitespace in haystack that might be collapsed
+            h_idx += 1;
+            // Don't advance needle index - this might be extra whitespace
+        } else {
+            // No match
+            return None;
+        }
+    }
+
+    // Check if we've consumed the entire needle
+    if n_idx == normalized_needle.len() {
+        Some(h_idx - start_pos)
+    } else {
+        None
+    }
+}
+
 /// Edit a file by replacing an exact string match with new content.
 ///
 /// Uses `old_string` → `new_string` precise replacement within the workspace.
@@ -228,35 +279,84 @@ impl Tool for FileEditTool {
 
         let match_count = content.matches(old_string).count();
 
-        if match_count == 0 {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("old_string not found in file".into()),
-            });
-        }
+        let (final_old_string, fallback_used) = if match_count == 0 {
+            // Try whitespace-flexible matching fallback
+            let normalized_old = normalize_whitespace(old_string);
+            let mut fallback_matches = Vec::new();
 
-        if match_count > 1 {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "old_string matches {match_count} times; must match exactly once"
-                )),
-            });
-        }
+            // Find all potential matches with normalized whitespace
+            let content_chars: Vec<char> = content.chars().collect();
+            let normalized_old_chars: Vec<char> = normalized_old.chars().collect();
 
-        let new_content = content.replacen(old_string, new_string, 1);
+            if !normalized_old_chars.is_empty() {
+                let mut i = 0;
+                while i <= content_chars.len().saturating_sub(1) {
+                    if let Some(match_len) =
+                        find_whitespace_flexible_match(&content_chars[i..], &normalized_old_chars)
+                    {
+                        let match_start = i;
+                        let match_end = i + match_len;
+                        let matched_text: String =
+                            content_chars[match_start..match_end].iter().collect();
+                        fallback_matches.push((match_start, matched_text));
+                        i = match_end;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+
+            if fallback_matches.is_empty() {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("old_string not found in file (tried both exact and whitespace-flexible matching)".into()),
+                });
+            }
+
+            if fallback_matches.len() > 1 {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "old_string matches {} times with whitespace-flexible matching; must match exactly once",
+                        fallback_matches.len()
+                    )),
+                });
+            }
+
+            (fallback_matches[0].1.clone(), true)
+        } else {
+            if match_count > 1 {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "old_string matches {match_count} times; must match exactly once"
+                    )),
+                });
+            }
+            (old_string.to_string(), false)
+        };
+
+        let new_content = content.replacen(&final_old_string, new_string, 1);
 
         match tokio::fs::write(&resolved_target, &new_content).await {
-            Ok(()) => Ok(ToolResult {
-                success: true,
-                output: format!(
-                    "Edited {path}: replaced 1 occurrence ({} bytes)",
-                    new_content.len()
-                ),
-                error: None,
-            }),
+            Ok(()) => {
+                let match_method = if fallback_used {
+                    " (using whitespace-flexible matching)"
+                } else {
+                    ""
+                };
+                Ok(ToolResult {
+                    success: true,
+                    output: format!(
+                        "Edited {path}: replaced 1 occurrence{match_method} ({} bytes)",
+                        new_content.len()
+                    ),
+                    error: None,
+                })
+            }
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -845,5 +945,216 @@ mod tests {
         assert!(result.error.as_ref().unwrap().contains("not allowed"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_edit_whitespace_flexible_matching_single_space() {
+        let dir = std::env::temp_dir().join("zeroclaw_test_file_edit_ws_flexible_single");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("test.txt"), "hello    world") // multiple spaces
+            .await
+            .unwrap();
+
+        let tool = FileEditTool::new(test_security(dir.clone()));
+        let result = tool
+            .execute(json!({
+                "path": "test.txt",
+                "old_string": "hello world",  // single space
+                "new_string": "goodbye universe"
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "whitespace-flexible edit should succeed: {:?}",
+            result.error
+        );
+        assert!(result.output.contains("whitespace-flexible matching"));
+
+        let content = tokio::fs::read_to_string(dir.join("test.txt"))
+            .await
+            .unwrap();
+        assert_eq!(content, "goodbye universe");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_edit_whitespace_flexible_matching_tabs_newlines() {
+        let dir = std::env::temp_dir().join("zeroclaw_test_file_edit_ws_flexible_tabs");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("test.txt"), "hello\t\n world") // tab and newline
+            .await
+            .unwrap();
+
+        let tool = FileEditTool::new(test_security(dir.clone()));
+        let result = tool
+            .execute(json!({
+                "path": "test.txt",
+                "old_string": "hello world",  // normalized whitespace
+                "new_string": "goodbye universe"
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "whitespace-flexible edit should succeed: {:?}",
+            result.error
+        );
+        assert!(result.output.contains("whitespace-flexible matching"));
+
+        let content = tokio::fs::read_to_string(dir.join("test.txt"))
+            .await
+            .unwrap();
+        assert_eq!(content, "goodbye universe");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_edit_whitespace_flexible_multiple_matches_fails() {
+        let dir = std::env::temp_dir().join("zeroclaw_test_file_edit_ws_flexible_multi");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("test.txt"), "hello   world\nhello\tworld") // two similar patterns
+            .await
+            .unwrap();
+
+        let tool = FileEditTool::new(test_security(dir.clone()));
+        let result = tool
+            .execute(json!({
+                "path": "test.txt",
+                "old_string": "hello world",  // would match both with flexible matching
+                "new_string": "goodbye"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("matches 2 times with whitespace-flexible"));
+
+        // File should be unchanged
+        let content = tokio::fs::read_to_string(dir.join("test.txt"))
+            .await
+            .unwrap();
+        assert_eq!(content, "hello   world\nhello\tworld");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_edit_exact_match_preferred_over_flexible() {
+        let dir = std::env::temp_dir().join("zeroclaw_test_file_edit_exact_preferred");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("test.txt"), "hello world\nhello    world") // exact and flexible matches
+            .await
+            .unwrap();
+
+        let tool = FileEditTool::new(test_security(dir.clone()));
+        let result = tool
+            .execute(json!({
+                "path": "test.txt",
+                "old_string": "hello world",  // exact match exists
+                "new_string": "goodbye"
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "exact match should succeed: {:?}",
+            result.error
+        );
+        assert!(!result.output.contains("whitespace-flexible matching")); // Should use exact match
+
+        let content = tokio::fs::read_to_string(dir.join("test.txt"))
+            .await
+            .unwrap();
+        assert_eq!(content, "goodbye\nhello    world"); // Only exact match replaced
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_edit_whitespace_flexible_no_match() {
+        let dir = std::env::temp_dir().join("zeroclaw_test_file_edit_ws_flexible_nomatch");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("test.txt"), "hello world")
+            .await
+            .unwrap();
+
+        let tool = FileEditTool::new(test_security(dir.clone()));
+        let result = tool
+            .execute(json!({
+                "path": "test.txt",
+                "old_string": "goodbye universe",  // completely different text
+                "new_string": "replacement"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("tried both exact and whitespace-flexible matching"));
+
+        // File should be unchanged
+        let content = tokio::fs::read_to_string(dir.join("test.txt"))
+            .await
+            .unwrap();
+        assert_eq!(content, "hello world");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn test_normalize_whitespace() {
+        assert_eq!(normalize_whitespace("hello world"), "hello world");
+        assert_eq!(normalize_whitespace("hello    world"), "hello world");
+        assert_eq!(normalize_whitespace("  hello\t\nworld  "), "hello world");
+        assert_eq!(normalize_whitespace("hello\r\n\tworld"), "hello world");
+        assert_eq!(normalize_whitespace("   "), "");
+        assert_eq!(normalize_whitespace(""), "");
+        assert_eq!(normalize_whitespace("single"), "single");
+    }
+
+    #[test]
+    fn test_find_whitespace_flexible_match() {
+        // Basic exact match
+        let haystack: Vec<char> = "hello world".chars().collect();
+        let needle: Vec<char> = "hello world".chars().collect();
+        assert_eq!(find_whitespace_flexible_match(&haystack, &needle), Some(11));
+
+        // Multiple spaces to single space
+        let haystack: Vec<char> = "hello    world".chars().collect();
+        let needle: Vec<char> = "hello world".chars().collect();
+        assert_eq!(find_whitespace_flexible_match(&haystack, &needle), Some(14));
+
+        // Tab/newline to space
+        let haystack: Vec<char> = "hello\t\nworld".chars().collect();
+        let needle: Vec<char> = "hello world".chars().collect();
+        assert_eq!(find_whitespace_flexible_match(&haystack, &needle), Some(12));
+
+        // No match - different text
+        let haystack: Vec<char> = "hello world".chars().collect();
+        let needle: Vec<char> = "goodbye".chars().collect();
+        assert_eq!(find_whitespace_flexible_match(&haystack, &needle), None);
+
+        // Empty needle
+        let haystack: Vec<char> = "hello world".chars().collect();
+        let needle: Vec<char> = "".chars().collect();
+        assert_eq!(find_whitespace_flexible_match(&haystack, &needle), None);
     }
 }
