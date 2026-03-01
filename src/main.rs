@@ -132,7 +132,7 @@ enum EstopLevelArg {
 #[derive(Parser, Debug)]
 #[command(name = "zeroclaw")]
 #[command(author = "theonlyhennygod")]
-#[command(version)]
+#[command(version = env!("ZEROCLAW_VERSION_DISPLAY"))]
 #[command(about = "The fastest, smallest AI assistant.", long_about = None)]
 struct Cli {
     #[arg(long, global = true)]
@@ -2319,6 +2319,32 @@ mod tests {
     #[test]
     fn cli_definition_has_no_flag_conflicts() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_uses_build_time_version_display() {
+        let cmd = Cli::command();
+        let version = cmd.get_version().expect("cli version should be set");
+        assert_eq!(version, env!("ZEROCLAW_VERSION_DISPLAY"));
+    }
+
+    #[test]
+    fn version_display_format_is_semver_or_semver_plus_hash() {
+        let version = env!("ZEROCLAW_VERSION_DISPLAY");
+        let pkg = env!("CARGO_PKG_VERSION");
+        if version == pkg {
+            return;
+        }
+
+        let prefix = format!("{pkg} (");
+        let hash = version
+            .strip_prefix(&prefix)
+            .and_then(|tail| tail.strip_suffix(')'))
+            .expect("version with metadata must be '<semver> (<hash>)'");
+        assert!(
+            !hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "version metadata should be a non-empty hexadecimal git hash"
+        );
     }
 
     #[test]
