@@ -23,7 +23,9 @@ jobs:
   contributor-tier-issues:
     if: >-
       (github.event_name == 'issues' &&
-      (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'labeled' || github.event.action == 'unlabeled')) ||
+      (github.event.action == 'opened' || github.event.action == 'reopened' || 
+       (github.event.action == 'labeled' && github.event.issue.created_at != github.event.issue.updated_at) ||
+       github.event.action == 'unlabeled')) ||
       (github.event_name == 'pull_request_target' &&
       (github.event.action == 'labeled' || github.event.action == 'unlabeled'))
     runs-on: ubuntu-22.04
@@ -75,7 +77,7 @@ jobs:
             See `CONTRIBUTING.md` and `docs/pr-workflow.md` for full collaboration rules.
 
   labeled-routes:
-    if: github.event.action == 'labeled'
+    if: github.event.action == 'labeled' && (github.event_name == 'pull_request_target' || github.event.issue.created_at != github.event.issue.updated_at)
     runs-on: ubuntu-22.04
     permissions:
       contents: read
