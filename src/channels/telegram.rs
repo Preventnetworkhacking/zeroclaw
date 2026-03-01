@@ -3153,11 +3153,15 @@ impl Channel for TelegramChannel {
             raw_args
         };
 
+        // Format approval message with code formatting
+        let approval_text = format!(
+            "Approval required for tool `{tool_name}`.\nRequest ID: `{request_id}`\nArgs: `{args_preview}`",
+        );
+
         let mut body = serde_json::json!({
             "chat_id": chat_id,
-            "text": format!(
-                "Approval required for tool `{tool_name}`.\nRequest ID: `{request_id}`\nArgs: `{args_preview}`",
-            ),
+            "text": Self::markdown_to_telegram_html(&approval_text),
+            "parse_mode": "HTML",
             "reply_markup": {
                 "inline_keyboard": [[
                     {
@@ -3183,9 +3187,46 @@ impl Channel for TelegramChannel {
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let err = response.text().await.unwrap_or_default();
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        // HTML parsing failed — retry without parse_mode as fallback
+        let plain_approval_text = format!(
+            "Approval required for tool {tool_name}.\nRequest ID: {request_id}\nArgs: {args_preview}",
+        );
+
+        let mut plain_body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": plain_approval_text,
+            "reply_markup": {
+                "inline_keyboard": [[
+                    {
+                        "text": "Approve",
+                        "callback_data": format!("{TELEGRAM_APPROVAL_CALLBACK_APPROVE_PREFIX}{request_id}")
+                    },
+                    {
+                        "text": "Deny",
+                        "callback_data": format!("{TELEGRAM_APPROVAL_CALLBACK_DENY_PREFIX}{request_id}")
+                    }
+                ]]
+            }
+        });
+
+        if let Some(thread_id) = thread_id {
+            plain_body["message_thread_id"] = serde_json::Value::String(thread_id);
+        }
+
+        let plain_response = self
+            .http_client()
+            .post(self.api_url("sendMessage"))
+            .json(&plain_body)
+            .send()
+            .await?;
+
+        if !plain_response.status().is_success() {
+            let status = plain_response.status();
+            let err = plain_response.text().await.unwrap_or_default();
             let sanitized = Self::sanitize_telegram_error(&err);
             anyhow::bail!("Telegram approval prompt failed ({status}): {sanitized}");
         }
