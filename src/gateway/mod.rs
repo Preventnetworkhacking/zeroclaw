@@ -23,7 +23,9 @@ use crate::cost::CostTracker;
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::providers::{self, ChatMessage, Provider};
 use crate::runtime;
-use crate::security::pairing::{constant_time_eq, is_public_bind, PairingGuard};
+use crate::security::pairing::{
+    constant_time_eq, is_private_network, is_public_bind, PairingGuard,
+};
 use crate::security::SecurityPolicy;
 use crate::tools::traits::ToolSpec;
 use crate::tools::{self, Tool};
@@ -387,6 +389,13 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             "🛑 Refusing to bind to {host} — gateway would be exposed to the internet.\n\
              Fix: use --host 127.0.0.1 (default), configure a tunnel, or set\n\
              [gateway] allow_public_bind = true in config.toml (NOT recommended)."
+        );
+    }
+
+    if is_private_network(host) {
+        tracing::warn!(
+            host = host,
+            "⚠️  Binding to private network address — gateway will be accessible on your local network.              Use --host 127.0.0.1 to restrict to this machine only."
         );
     }
     let config_state = Arc::new(Mutex::new(config.clone()));
