@@ -476,6 +476,16 @@ pub fn is_public_bind(host: &str) -> bool {
             && !(a == 169 && b == 254);
     }
 
+    // IPv6: treat loopback, link-local (fe80::/10), and ULA (fc00::/7) as non-public
+    if let Some(bytes) = parse_ipv6(h) {
+        let is_loopback = bytes == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let is_link_local = bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80;
+        let is_ula = (bytes[0] & 0xfe) == 0xfc;
+        if is_loopback || is_link_local || is_ula {
+            return false;
+        }
+    }
+
     true
 }
 
@@ -492,6 +502,11 @@ pub fn is_private_network(host: &str) -> bool {
             || (a == 192 && b == 168)
             || (a == 169 && b == 254);
     }
+    if let Some(bytes) = parse_ipv6(h) {
+        let is_link_local = bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80;
+        let is_ula = (bytes[0] & 0xfe) == 0xfc;
+        return is_link_local || is_ula;
+    }
     false
 }
 
@@ -503,6 +518,64 @@ fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
     let c = parts.next()?.parse::<u8>().ok()?;
     let d = parts.next()?.parse::<u8>().ok()?;
     Some([a, b, c, d])
+}
+
+/// Parse an IPv6 string into 16 bytes. Supports `::` shorthand.
+fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
+    let s = s
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(s);
+    if s.contains('.') {
+        return None;
+    }
+    let mut result = [0u8; 16];
+    if s == "::" {
+        return Some(result);
+    }
+    let has_double_colon = s.contains("::");
+    let (head, tail) = if let Some(pos) = s.find("::") {
+        let h = &s[..pos];
+        let t = &s[pos + 2..];
+        (
+            if h.is_empty() {
+                vec![]
+            } else {
+                h.split(':').collect::<Vec<_>>()
+            },
+            if t.is_empty() {
+                vec![]
+            } else {
+                t.split(':').collect::<Vec<_>>()
+            },
+        )
+    } else {
+        (s.split(':').collect::<Vec<_>>(), vec![])
+    };
+    if !has_double_colon && head.len() != 8 {
+        return None;
+    }
+    if has_double_colon && head.len() + tail.len() > 7 {
+        return None;
+    }
+    let zero_groups = 8 - head.len() - tail.len();
+    let mut idx = 0;
+    for group in &head {
+        let val = u16::from_str_radix(group, 16).ok()?;
+        result[idx] = (val >> 8) as u8;
+        result[idx + 1] = val as u8;
+        idx += 2;
+    }
+    if has_double_colon {
+        idx += zero_groups * 2;
+    }
+    for group in &tail {
+        let val = u16::from_str_radix(group, 16).ok()?;
+        result[idx] = (val >> 8) as u8;
+        result[idx + 1] = val as u8;
+        idx += 2;
+    }
+    Some(result)
 }
 
 #[cfg(test)]
@@ -701,11 +774,35 @@ mod tests {
         assert!(is_public_bind("8.8.8.8"));
         assert!(is_public_bind("1.2.3.4"));
         assert!(is_public_bind("203.0.113.1"));
+
+        // IPv6 loopback
+        assert!(!is_public_bind("::1"));
+        assert!(!is_public_bind("[::1]"));
+        assert!(!is_public_bind("0:0:0:0:0:0:0:1"));
+
+        // IPv6 link-local (fe80::/10)
+        assert!(!is_public_bind("fe80::1"));
+        assert!(!is_public_bind("[fe80::1]"));
+        assert!(!is_public_bind("fe80::abcd:1234"));
+
+        // IPv6 ULA (fc00::/7)
+        assert!(!is_public_bind("fc00::1"));
+        assert!(!is_public_bind("fd12:3456::1"));
+
+        // IPv6 public should remain public
+        assert!(is_public_bind("2001:db8::1"));
+        assert!(is_public_bind("2607:f8b0::1"));
     }
 
     #[test]
     async fn private_network_detection() {
         assert!(is_private_network("192.168.1.100"));
+
+        // IPv6 private networks
+        assert!(is_private_network("fe80::1"));
+        assert!(is_private_network("fd12:3456::1"));
+        assert!(!is_private_network("2001:db8::1"));
+        assert!(!is_private_network("::1")); // loopback is not "private network"
         assert!(is_private_network("10.0.0.1"));
         assert!(is_private_network("172.16.0.1"));
         assert!(is_private_network("169.254.1.1"));
