@@ -481,7 +481,19 @@ pub fn is_public_bind(host: &str) -> bool {
         let is_loopback = bytes == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
         let is_link_local = bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80;
         let is_ula = (bytes[0] & 0xfe) == 0xfc;
-        if is_loopback || is_link_local || is_ula {
+        // IPv4-mapped IPv6 (::ffff:x.y.z.w) — check embedded IPv4
+        let is_v4_mapped_private = bytes[..10] == [0; 10]
+            && bytes[10] == 0xff
+            && bytes[11] == 0xff
+            && {
+                let (a, b) = (bytes[12], bytes[13]);
+                a == 10
+                    || a == 127
+                    || (a == 172 && (16..=31).contains(&b))
+                    || (a == 192 && b == 168)
+                    || (a == 169 && b == 254)
+            };
+        if is_loopback || is_link_local || is_ula || is_v4_mapped_private {
             return false;
         }
     }
@@ -505,7 +517,18 @@ pub fn is_private_network(host: &str) -> bool {
     if let Some(bytes) = parse_ipv6(h) {
         let is_link_local = bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80;
         let is_ula = (bytes[0] & 0xfe) == 0xfc;
-        return is_link_local || is_ula;
+        // IPv4-mapped IPv6 (::ffff:x.y.z.w) — check embedded IPv4
+        let is_v4_mapped_private = bytes[..10] == [0; 10]
+            && bytes[10] == 0xff
+            && bytes[11] == 0xff
+            && {
+                let (a, b) = (bytes[12], bytes[13]);
+                a == 10
+                    || (a == 172 && (16..=31).contains(&b))
+                    || (a == 192 && b == 168)
+                    || (a == 169 && b == 254)
+            };
+        return is_link_local || is_ula || is_v4_mapped_private;
     }
     false
 }
@@ -526,7 +549,21 @@ fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(s);
+    // Handle IPv4-mapped IPv6 addresses (e.g. ::ffff:192.168.1.10)
     if s.contains('.') {
+        if let Some(v4_part) = s.rsplit(':').next() {
+            if let Some(ipv4) = parse_ipv4(v4_part) {
+                let prefix = s.strip_suffix(v4_part)?.strip_suffix(':')?;
+                // Only support the standard ::ffff: mapping
+                let prefix_lower = prefix.to_ascii_lowercase();
+                if prefix_lower == "::ffff" || prefix_lower == "0:0:0:0:0:ffff" {
+                    return Some([
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, ipv4[0], ipv4[1],
+                        ipv4[2], ipv4[3],
+                    ]);
+                }
+            }
+        }
         return None;
     }
     let mut result = [0u8; 16];
@@ -792,6 +829,13 @@ mod tests {
         // IPv6 public should remain public
         assert!(is_public_bind("2001:db8::1"));
         assert!(is_public_bind("2607:f8b0::1"));
+
+        // IPv4-mapped IPv6 — private addresses not public
+        assert!(!is_public_bind("::ffff:192.168.1.10"));
+        assert!(!is_public_bind("::ffff:10.0.0.1"));
+        assert!(!is_public_bind("::ffff:127.0.0.1"));
+        // IPv4-mapped IPv6 — public addresses still public
+        assert!(is_public_bind("::ffff:8.8.8.8"));
     }
 
     #[test]
@@ -809,6 +853,11 @@ mod tests {
         assert!(!is_private_network("127.0.0.1"));
         assert!(!is_private_network("8.8.8.8"));
         assert!(!is_private_network("0.0.0.0"));
+
+        // IPv4-mapped IPv6 private addresses
+        assert!(is_private_network("::ffff:192.168.1.10"));
+        assert!(is_private_network("::ffff:10.0.0.1"));
+        assert!(!is_private_network("::ffff:8.8.8.8"));
     }
 
     // ── constant_time_eq ─────────────────────────────────────

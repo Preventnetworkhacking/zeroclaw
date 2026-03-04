@@ -418,7 +418,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     if is_private_network(host) {
         tracing::warn!(
             host = host,
-            "⚠️  Binding to private network address — gateway will be accessible on your local network.              Use --host 127.0.0.1 to restrict to this machine only."
+            "⚠️  Binding to private network address — gateway will be accessible on your local network. Use --host 127.0.0.1 to restrict to this machine only."
         );
     }
     let config_state = Arc::new(Mutex::new(config.clone()));
